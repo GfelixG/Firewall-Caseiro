@@ -1,0 +1,16 @@
+# Ambientes virtuais
+.venv/
+venv/
+.env
+
+# Arquivos de build
+build/
+dist/
+*.spec
+*.toc
+*.pyz
+
+# Arquivos de cache e logs
+__pycache__/
+*.pyc
+*.log
