@@ -2,10 +2,11 @@ import logging
 import ipaddress
 import time
 from collections import defaultdict
-from threading import Thread, Event
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
-from Blocklist import carregar_lista_de_blocks, salvar_lista_de_blocks # Importa do arquivo Blocklist.py
+from threading import Thread, Event, Lock
+import queue
+import json
+import streamlit as st
+from Blocklist import carregar_lista_de_blocks, salvar_lista_de_blocks  # Importa do arquivo Blocklist.py
 
 # Ativando o pydivert para poder bloquear pacotes
 try:
@@ -16,122 +17,137 @@ except Exception as e:
 
 # Variáveis de bloqueio
 LISTA_DE_BLOCKS = "blocklist.json"
-bloqueados = {"ips_blocked": set(), "ports_blocked": set()}
-bloqueados = carregar_lista_de_blocks(LISTA_DE_BLOCKS)  # IPs e portas bloqueados
-conexoes_control = defaultdict(list)
-portas_control = defaultdict(list)
 
 DOS_LIMIT = 100       # Máx. conexões em X segundos (DOS_INTERVAL)
 DOS_INTERVAL = 10     
 SCAN_LIMIT = 10       # Máx. portas diferentes em X segundos (SCAN_INTERVAL)
 SCAN_INTERVAL = 30
 
-# Guarda o estado atual do programa
-estado = {
-    "blocks": bloqueados,
-    "conexoes": conexoes_control,  # Controlador das conexões
-    "portas": portas_control,      # Controlador das portas
-    "pacotes_permitidos": 0,       # Contador para estatística
-    "pacotes_bloqueados": 0        # Contador para estatística
-}
-
-# Evento para parar a thread do firewall
-stop_event = Event()
-
 # Funções auxiliares
-def valid_ip(ip_str): # Verifica se o IP é válido
+def valid_ip(ip_str):  # Verifica se o IP é válido
     try:
         ipaddress.ip_address(ip_str)
         return True
     except Exception:
         return False
 
-def add_block_ip (ip, refresh_ui=None):
+def add_block_ip(ip, estado, lock):
     if valid_ip(ip):
-        estado["blocks"]["ips_blocked"].add(ip)
+        with lock:
+            estado["blocks"]["ips_blocked"].add(ip)
+            ips = sorted(list(estado["blocks"]["ips_blocked"]))
+            ports = sorted(list(estado["blocks"]["ports_blocked"]))
         logging.info(f"ADD {ip}")
-        if refresh_ui:
-            refresh_ui()  # Atualiza Listbox na UI
-        return True
-
-def remove_block_ip(ip, refresh_ui=None):
-    if ip in estado["blocks"]["ips_blocked"]:
-        estado["blocks"]["ips_blocked"].remove(ip)
-        logging.info(f"REMOVE IP: {ip}")
-        if refresh_ui:
-            refresh_ui()
+        try:
+            with open(LISTA_DE_BLOCKS, "w") as f:
+                json.dump({"ips_blocked": ips, "ports_blocked": ports}, f, indent=2)
+            logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
+        except Exception as e:
+            logging.exception("Erro ao salvar blocklist: %s", e)
         return True
     return False
 
-def add_block_port(port, refresh_ui=None):
+def remove_block_ip(ip, estado, lock):
+    with lock:
+        if ip in estado["blocks"]["ips_blocked"]:
+            estado["blocks"]["ips_blocked"].remove(ip)
+            ips = sorted(list(estado["blocks"]["ips_blocked"]))
+            ports = sorted(list(estado["blocks"]["ports_blocked"]))
+            logging.info(f"REMOVE IP: {ip}")
+            try:
+                with open(LISTA_DE_BLOCKS, "w") as f:
+                    json.dump({"ips_blocked": ips, "ports_blocked": ports}, f, indent=2)
+                logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
+            except Exception as e:
+                logging.exception("Erro ao salvar blocklist: %s", e)
+            return True
+    return False
+
+def add_block_port(port, estado, lock):
     try:
         port = int(port)
         if 1 <= port <= 65535:
-            estado["blocks"]["ports_blocked"].add(port)
+            with lock:
+                estado["blocks"]["ports_blocked"].add(port)
+                ips = sorted(list(estado["blocks"]["ips_blocked"]))
+                ports = sorted(list(estado["blocks"]["ports_blocked"]))
             logging.info(f"ADD PORT: {port}")
-            if refresh_ui:
-                refresh_ui()
+            try:
+                with open(LISTA_DE_BLOCKS, "w") as f:
+                    json.dump({"ips_blocked": ips, "ports_blocked": ports}, f, indent=2)
+                logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
+            except Exception as e:
+                logging.exception("Erro ao salvar blocklist: %s", e)
             return True
     except ValueError:
         pass
     return False
 
-def remove_block_port(port, refresh_ui=None):
+def remove_block_port(port, estado, lock):
     try:
         port = int(port)
-        if port in estado["blocks"]["ports_blocked"]:
-            estado["blocks"]["ports_blocked"].remove(port)
-            logging.info(f"REMOVE PORT: {port}")
-            if refresh_ui:
-                refresh_ui()
-            return True
+        with lock:
+            if port in estado["blocks"]["ports_blocked"]:
+                estado["blocks"]["ports_blocked"].remove(port)
+                ips = sorted(list(estado["blocks"]["ips_blocked"]))
+                ports = sorted(list(estado["blocks"]["ports_blocked"]))
+                logging.info(f"REMOVE PORT: {port}")
+                try:
+                    with open(LISTA_DE_BLOCKS, "w") as f:
+                        json.dump({"ips_blocked": ips, "ports_blocked": ports}, f, indent=2)
+                    logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
+                except Exception as e:
+                    logging.exception("Erro ao salvar blocklist: %s", e)
+                return True
     except ValueError:
         pass
     return False
 
 # Funções das regras que geram bloqueios de IPs ou portas
-def na_lista_de_blocks (n, var="ip", stts=estado["blocks"]):
-    if var == "ip":
-        if n in stts["ips_blocked"]:
-            return "IP na lista de IPs bloqueados"
-    
-    # Se não for um IP, será uma porta
-    elif var == "porta" or var == "port":
-        if n in stts["ports_blocked"]:
-            return "Porta na lista de portas bloqueadas"
-    
-    else:
-        print("Por favor, especifique o tipo do valor")
-
+def na_lista_de_blocks(n, var="ip", estado=None, lock=None):
+    with lock:
+        if var == "ip":
+            if n in estado["blocks"]["ips_blocked"]:
+                return "IP na lista de IPs bloqueados"
+        
+        elif var == "porta" or var == "port":
+            if n in estado["blocks"]["ports_blocked"]:
+                return "Porta na lista de portas bloqueadas"
+        
     return None
 
-def ataque_DoS (ip, stts=estado["conexoes"]):
+def ataque_DoS(ip, estado, lock):
     tempo_agora = time.time()
-
-    stts[ip].append(tempo_agora)
-    stts[ip] = [t for t in stts[ip] if tempo_agora - t < DOS_INTERVAL]
-    
-    if len(stts[ip]) > DOS_LIMIT:
-        return "Ataque DoS detectado"
-    
+    with lock:
+        estado["conexoes"][ip].append(tempo_agora)
+        estado["conexoes"][ip] = [t for t in estado["conexoes"][ip] if tempo_agora - t < DOS_INTERVAL]
+        
+        if len(estado["conexoes"][ip]) > DOS_LIMIT:
+            return "Ataque DoS detectado"
+        
     return None
 
-def varredura_de_portas (ip, port, stts=estado["portas"]):
+def varredura_de_portas(ip, port, estado, lock):
     tempo_agora = time.time()
+    with lock:
+        estado["portas"][ip].append((port, tempo_agora))
+        estado["portas"][ip] = [(p, t) for (p, t) in estado["portas"][ip] if tempo_agora - t < SCAN_INTERVAL]
+        portas_unicas = set(p for (p, _) in estado["portas"][ip])
 
-    stts[ip].append((port, tempo_agora))
-    stts[ip] = [(p, t) for (p, t) in stts[ip] if tempo_agora - t < SCAN_INTERVAL]
-    portas_unicas = set(p for (p, _) in stts[ip])
-
-    if len(portas_unicas) > SCAN_LIMIT:
-        return "Varredura de portas detectada"
-    
+        if len(portas_unicas) > SCAN_LIMIT:
+            return "Varredura de portas detectada"
+        
     return None
 
 # Função principal do firewall (roda em thread)
-def main(log_func, stats_update_func):
-    print("Firewall ativo! Capturando pacotes...")
-    log_func("Firewall ativo! Capturando pacotes...")
+def main(log_queue, estado, stop_event, lock):
+    def put_log(msg, color):
+        timestamp = time.strftime('%H:%M:%S')
+        log_queue.put((msg, color, timestamp))
+        print(f"[{timestamp}] {msg}")
+        logging.info(msg)
+    
+    put_log("Firewall ativo! Capturando pacotes...", "black")
     
     with pydivert.WinDivert("ip") as w:
         while not stop_event.is_set():
@@ -142,151 +158,174 @@ def main(log_func, stats_update_func):
                 motivo = None
 
                 # Verificações sem redundância
-                motivo_ip = na_lista_de_blocks(ip_origem)
+                motivo_ip = na_lista_de_blocks(ip_origem, var="ip", estado=estado, lock=lock)
                 if motivo_ip:
                     motivo = motivo_ip
                 else:
-                    motivo_porta = na_lista_de_blocks(port_destino, var="porta")
+                    motivo_porta = na_lista_de_blocks(port_destino, var="porta", estado=estado, lock=lock)
                     if motivo_porta:
                         motivo = motivo_porta
                     else:
-                        motivo_dos = ataque_DoS(ip_origem)
+                        motivo_dos = ataque_DoS(ip_origem, estado, lock)
                         if motivo_dos:
                             motivo = motivo_dos
-                            add_block_ip(ip_origem)
+                            add_block_ip(ip_origem, estado, lock)
                         else:
-                            motivo_scan = varredura_de_portas(ip_origem, port_destino)
+                            motivo_scan = varredura_de_portas(ip_origem, port_destino, estado, lock)
                             if motivo_scan:
                                 motivo = motivo_scan
-                                add_block_ip(ip_origem)
+                                add_block_ip(ip_origem, estado, lock)
 
                 if motivo:
-                    log_func(f"[BLOQUEADO] {ip_origem} -> {packet.dst_addr}:{port_destino} ({motivo})", color="red")
-                    estado["pacotes_bloqueados"] += 1
-                    stats_update_func()  # Atualiza stats na UI
+                    put_log(f"[BLOQUEADO] {ip_origem} -> {packet.dst_addr}:{port_destino} ({motivo})", "red")
+                    with lock:
+                        estado["pacotes_bloqueados"] += 1
                     continue  # Descarta pacote (bloqueia)
                 
                 # Permitido
-                log_func(f"[PERMITIDO] {ip_origem} -> {packet.dst_addr}:{port_destino}", color="green")
-                estado["pacotes_permitidos"] += 1
-                stats_update_func()
+                put_log(f"[PERMITIDO] {ip_origem} -> {packet.dst_addr}:{port_destino}", "green")
+                with lock:
+                    estado["pacotes_permitidos"] += 1
                 w.send(packet)  # Libera pacote
             except Exception as e:
-                log_func(f"Erro ao processar pacote: {e}", color="orange")
+                put_log(f"Erro ao processar pacote: {e}", "orange")
 
-    log_func("Firewall parado.")
-                
-# Configuração da UI com Tkinter
+    put_log("Firewall parado.", "black")
+
+# Configuração da UI com Streamlit
 def setup_ui():
-    root = tk.Tk()
-    root.title("Firewall Caseiro")
-    root.geometry("800x600")
-    root.config(bg="#F1BBBB")
+    st.title("Firewall Caseiro")
 
-    style = ttk.Style()
-    style.configure("TNotebook", background="#F1BBBB")
-    style.configure("TFrame", background="#F1BBBB")
-    # Removendo a linha problemática do estilo
-    # style.configure("TLabelFrame", background="#E6D8CB", foreground="#2F3559", font=("Arial", 12, "bold"))
+    # Inicializar estado da sessão
+    if 'estado' not in st.session_state:
+        blocks = carregar_lista_de_blocks(LISTA_DE_BLOCKS)
+        st.session_state.estado = {
+            "blocks": blocks,
+            "conexoes": defaultdict(list),
+            "portas": defaultdict(list),
+            "pacotes_permitidos": 0,
+            "pacotes_bloqueados": 0
+        }
+    if 'logs' not in st.session_state:
+        st.session_state.logs = []
+    if 'running' not in st.session_state:
+        st.session_state.running = False
+    if 'stop_event' not in st.session_state:
+        st.session_state.stop_event = Event()
+    if 'firewall_thread' not in st.session_state:
+        st.session_state.firewall_thread = None
+    if 'log_queue' not in st.session_state:
+        st.session_state.log_queue = queue.Queue()
+    if 'estado_lock' not in st.session_state:
+        st.session_state.estado_lock = Lock()
 
-    # Notebook para tabs
-    notebook = ttk.Notebook(root)
-    notebook.pack(fill="both", expand=True, padx=10, pady=10)
+    log_queue = st.session_state.log_queue
+    lock = st.session_state.estado_lock
+    estado = st.session_state.estado
 
-    # Tab Logs
-    log_frame = ttk.Frame(notebook, style="TFrame")
-    notebook.add(log_frame, text="Logs")
-    log_text = scrolledtext.ScrolledText(log_frame, height=25, width=90, wrap=tk.WORD, bg="#E6D8CB", fg="#2F3559", font=("Arial", 10))
-    log_text.pack(pady=10, padx=10)
+    # Process logs from queue
+    while not log_queue.empty():
+        msg, color, timestamp = log_queue.get()
+        st.session_state.logs.append((f"[{timestamp}] {msg}", color))
 
-    def log_to_ui(msg, color="black"):
-        log_text.tag_configure(color, foreground=color)
-        log_text.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {msg}\n", color)
-        log_text.see(tk.END)
-        print(msg)
-        logging.info(msg)
+    # Tabs
+    tab_logs, tab_regras, tab_estatisticas = st.tabs(["Logs", "Regras", "Estatísticas"])
 
-    # Tab Regras
-    rules_frame = ttk.Frame(notebook)
-    notebook.add(rules_frame, text="Regras")
+    with tab_logs:
+        st.subheader("Logs")
+        for msg, color in st.session_state.logs:
+            st.markdown(f'<p style="color:{color};">{msg}</p>', unsafe_allow_html=True)
+        if st.button("Limpar Logs"):
+            st.session_state.logs = []
+            st.rerun()
 
-    # Seção IPs Bloqueados (removendo o estilo customizado)
-    ip_frame = ttk.LabelFrame(rules_frame, text="IPs Bloqueados")
-    ip_frame.pack(side="left", padx=20, pady=20, fill="y")
-    ip_listbox = tk.Listbox(ip_frame, height=15, width=30, bg="#E6D8CB", fg="#2F3559", font=("Arial", 10))
-    ip_listbox.pack(pady=5)
-    ip_entry = tk.Entry(ip_frame, bg="#E6D8CB", fg="#2F3559", font=("Arial", 10))
-    ip_entry.pack(pady=5)
-    add_ip_btn = tk.Button(ip_frame, text="Adicionar IP", command=lambda: add_block_ip(ip_entry.get(), refresh_rules) if add_block_ip(ip_entry.get(), refresh_rules) else messagebox.showerror("Erro", "IP inválido"), bg="#9A5071", fg="white", font=("Arial", 10, "bold"))
-    add_ip_btn.pack(pady=5)
-    remove_ip_btn = tk.Button(ip_frame, text="Remover IP", command=lambda: remove_block_ip(ip_listbox.get(tk.ACTIVE), refresh_rules) if remove_block_ip(ip_listbox.get(tk.ACTIVE), refresh_rules) else messagebox.showerror("Erro", "Selecione um IP"), bg="#2F3559", fg="white", font=("Arial", 10, "bold"))
-    remove_ip_btn.pack(pady=5)
+    with tab_regras:
+        st.subheader("Regras")
 
-    # Seção Portas Bloqueadas (removendo o estilo customizado)
-    port_frame = ttk.LabelFrame(rules_frame, text="Portas Bloqueadas")
-    port_frame.pack(side="right", padx=20, pady=20, fill="y")
-    port_listbox = tk.Listbox(port_frame, height=15, width=30, bg="#E6D8CB", fg="#2F3559", font=("Arial", 10))
-    port_listbox.pack(pady=5)
-    port_entry = tk.Entry(port_frame, bg="#E6D8CB", fg="#2F3559", font=("Arial", 10))
-    port_entry.pack(pady=5)
-    add_port_btn = tk.Button(port_frame, text="Adicionar Porta", command=lambda: add_block_port(port_entry.get(), refresh_rules) if add_block_port(port_entry.get(), refresh_rules) else messagebox.showerror("Erro", "Porta inválida (1-65535)"), bg="#9A5071", fg="white", font=("Arial", 10, "bold"))
-    add_port_btn.pack(pady=5)
-    remove_port_btn = tk.Button(port_frame, text="Remover Porta", command=lambda: remove_block_port(port_listbox.get(tk.ACTIVE), refresh_rules) if remove_block_port(port_listbox.get(tk.ACTIVE), refresh_rules) else messagebox.showerror("Erro", "Selecione uma porta"), bg="#2F3559", fg="white", font=("Arial", 10, "bold"))
-    remove_port_btn.pack(pady=5)
+        col1, col2 = st.columns(2)
 
-    # Função para atualizar Listboxes
-    def refresh_rules():
-        ip_listbox.delete(0, tk.END)
-        for ip in sorted(estado["blocks"]["ips_blocked"]):
-            ip_listbox.insert(tk.END, ip)
-        port_listbox.delete(0, tk.END)
-        for port in sorted(estado["blocks"]["ports_blocked"]):
-            port_listbox.insert(tk.END, port)
-        salvar_lista_de_blocks(estado["blocks"], LISTA_DE_BLOCKS)  # Salva ao editar
+        with col1:
+            st.subheader("IPs Bloqueados")
+            with lock:
+                ips = sorted(estado["blocks"]["ips_blocked"])
+            st.write("\n".join(ips) if ips else "Nenhum IP bloqueado.")
+            
+            ip_input = st.text_input("Adicionar IP")
+            if st.button("Adicionar IP"):
+                if add_block_ip(ip_input, estado, lock):
+                    st.success("IP adicionado!")
+                else:
+                    st.error("IP inválido.")
+                st.rerun()
+            
+            if ips:
+                ip_to_remove = st.selectbox("Selecione IP para remover", ips)
+                if st.button("Remover IP"):
+                    if remove_block_ip(ip_to_remove, estado, lock):
+                        st.success("IP removido!")
+                    else:
+                        st.error("Erro ao remover IP.")
+                    st.rerun()
 
-    refresh_rules()  # Inicial
+        with col2:
+            st.subheader("Portas Bloqueadas")
+            with lock:
+                ports = sorted(estado["blocks"]["ports_blocked"])
+            st.write("\n".join(map(str, ports)) if ports else "Nenhuma porta bloqueada.")
+            
+            port_input = st.text_input("Adicionar Porta")
+            if st.button("Adicionar Porta"):
+                if add_block_port(port_input, estado, lock):
+                    st.success("Porta adicionada!")
+                else:
+                    st.error("Porta inválida (1-65535).")
+                st.rerun()
+            
+            if ports:
+                port_to_remove = st.selectbox("Selecione Porta para remover", ports)
+                if st.button("Remover Porta"):
+                    if remove_block_port(port_to_remove, estado, lock):
+                        st.success("Porta removida!")
+                    else:
+                        st.error("Erro ao remover porta.")
+                    st.rerun()
 
-    # Tab Estatísticas
-    stats_frame = ttk.Frame(notebook, style="TFrame")
-    notebook.add(stats_frame, text="Estatísticas")
-    permitidos_label = tk.Label(stats_frame, text="Pacotes Permitidos: 0", font=("Arial", 14, "bold"), bg="#F1BBBB", fg="#2F3559")
-    permitidos_label.pack(pady=20)
-    bloqueados_label = tk.Label(stats_frame, text="Pacotes Bloqueados: 0", font=("Arial", 14, "bold"), bg="#F1BBBB", fg="#2F3559")
-    bloqueados_label.pack(pady=20)
+    with tab_estatisticas:
+        st.subheader("Estatísticas")
+        with lock:
+            st.metric("Pacotes Permitidos", estado["pacotes_permitidos"])
+            st.metric("Pacotes Bloqueados", estado["pacotes_bloqueados"])
 
-    def update_stats():
-        permitidos_label.config(text=f"Pacotes Permitidos: {estado['pacotes_permitidos']}")
-        bloqueados_label.config(text=f"Pacotes Bloqueados: {estado['pacotes_bloqueados']}")
+    # Botão Iniciar/Parar
+    if not st.session_state.running:
+        if st.button("Iniciar Firewall", type="primary"):
+            st.session_state.stop_event.clear()
+            st.session_state.firewall_thread = Thread(target=main, args=(log_queue, estado, st.session_state.stop_event, lock))
+            st.session_state.firewall_thread.daemon = True
+            st.session_state.firewall_thread.start()
+            st.session_state.running = True
+            st.rerun()
+    else:
+        if st.button("Parar Firewall"):
+            st.session_state.stop_event.set()
+            if st.session_state.firewall_thread:
+                st.session_state.firewall_thread.join(timeout=5)  # Espera um pouco para parar
+            st.session_state.running = False
+            with lock:
+                ips = sorted(list(estado["blocks"]["ips_blocked"]))
+                ports = sorted(list(estado["blocks"]["ports_blocked"]))
+            try:
+                with open(LISTA_DE_BLOCKS, "w") as f:
+                    json.dump({"ips_blocked": ips, "ports_blocked": ports}, f, indent=2)
+                logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
+            except Exception as e:
+                logging.exception("Erro ao salvar blocklist: %s", e)
+            st.rerun()
 
-    # Botão Iniciar/Parar (abaixo das tabs)
-    firewall_running = False
-    def toggle_firewall():
-        nonlocal firewall_running
-        if not firewall_running:
-            stop_event.clear()
-            thread = Thread(target=main, args=(log_to_ui, update_stats))
-            thread.daemon = True
-            thread.start()
-            start_btn.config(text="Parar Firewall", bg="#2F3559")
-            firewall_running = True
-        else:
-            stop_event.set()
-            start_btn.config(text="Iniciar Firewall", bg="#9A5071")
-            firewall_running = False
-            salvar_lista_de_blocks(estado["blocks"], LISTA_DE_BLOCKS)
-
-    start_btn = tk.Button(root, text="Iniciar Firewall", command=toggle_firewall, bg="#9A5071", fg="white", font=("Arial", 12, "bold"), relief="raised", padx=10, pady=5)
-    start_btn.pack(pady=10)
-
-    # Ao fechar janela, parar e salvar
-    def on_closing():
-        stop_event.set()
-        salvar_lista_de_blocks(estado["blocks"], LISTA_DE_BLOCKS)
-        root.destroy()
-
-    root.protocol("WM_DELETE_WINDOW", on_closing)
-
-    root.mainloop()
+    # Atualização automática quando rodando
+    if st.session_state.running:
+        time.sleep(1)  # Atualiza a cada 1 segundo
+        st.rerun()
 
 if __name__ == "__main__":
     logging.basicConfig(filename='firewall_log.txt', level=logging.INFO, format='%(asctime)s - %(message)s')

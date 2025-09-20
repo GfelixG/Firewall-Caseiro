@@ -6,6 +6,9 @@ import logging
 arq = "blocklist.json"
 
 def carregar_lista_de_blocks(path=arq):
+    """
+    Carrega IPs e portas bloqueadas de JSON, com validação.
+    """
     lista_de_blocks = {"ips_blocked": set(), "ports_blocked": set()}
 
     try:
@@ -37,6 +40,9 @@ def carregar_lista_de_blocks(path=arq):
     return lista_de_blocks
 
 def salvar_lista_de_blocks(lista_de_blocks, path=arq):
+    """
+    Salva IPs e portas bloqueadas em JSON.
+    """
     try:
         with open(path, "w") as f:
             json.dump({"ips_blocked": sorted(list(lista_de_blocks["ips_blocked"])),
