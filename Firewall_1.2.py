@@ -194,7 +194,24 @@ def main(log_queue, estado, stop_event, lock):
 
 # Configuração da UI com Streamlit
 def setup_ui():
-    st.title("Firewall Caseiro")
+    st.title("Firewall")
+
+    st.markdown(
+         """
+         <style>
+         button[kind="primary"] {
+        background-color: #2F3559;
+            color: white;
+            border-color: #9A5071;
+        }
+        button[kind="primary"]:hover {
+            background-color: #9A5071;
+            border-color: #9A5071;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
 
     # Inicializar estado da sessão
     if 'estado' not in st.session_state:
@@ -228,29 +245,78 @@ def setup_ui():
         msg, color, timestamp = log_queue.get()
         st.session_state.logs.append((f"[{timestamp}] {msg}", color))
 
+    # Botão Iniciar/Parar
+    col1, col2, col3 = st.columns([1,2,1])
+    with col2:
+        if not st.session_state.running:
+            if st.button("Iniciar Firewall ▶️", type="primary", use_container_width=True):
+                st.session_state.stop_event.clear()
+                st.session_state.firewall_thread = Thread(target=main, args=(log_queue, estado, st.session_state.stop_event, lock))
+                st.session_state.firewall_thread.daemon = True
+                st.session_state.firewall_thread.start()
+                st.session_state.running = True
+                st.rerun()
+        else:
+            if st.button("Parar Firewall 🛑", type="secondary", use_container_width=True):
+                st.session_state.stop_event.set()
+                if st.session_state.firewall_thread:
+                    st.session_state.firewall_thread.join(timeout=5)
+                st.session_state.running = False
+                with lock:
+                    ips = sorted(list(estado["blocks"]["ips_blocked"]))
+                    ports = sorted(list(estado["blocks"]["ports_blocked"]))
+                try:
+                    with open(LISTA_DE_BLOCKS, "w") as f:
+                        json.dump({"ips_blocked": ips, "ports_blocked": ports}, f, indent=2)
+                    logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
+                except Exception as e:
+                    logging.exception("Erro ao salvar blocklist: %s", e)
+                st.rerun()
+
     # Tabs
     tab_logs, tab_regras, tab_estatisticas = st.tabs(["Logs", "Regras", "Estatísticas"])
 
     with tab_logs:
-        st.subheader("Logs")
+        st.subheader("Logs de Atividade")
+        
+        logs_html = ""
         for msg, color in st.session_state.logs:
-            st.markdown(f'<p style="color:{color};">{msg}</p>', unsafe_allow_html=True)
+            logs_html += f'<p style="color:{color};">{msg}</p>'
+        
+        st.markdown(
+            f"""
+            <div id="log-container" style="background-color: #FAF0E6; border: 1px solid black; border-radius: 5px; padding: 10px; height: 400px; overflow-y: auto;">
+                {logs_html}
+            </div>
+            <script>
+                // Executa a rolagem após o conteúdo ser renderizado
+                var element = document.getElementById("log-container");
+                if (element) {{
+                    element.scrollTop = element.scrollHeight;
+                }}
+            </script>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        
         if st.button("Limpar Logs"):
             st.session_state.logs = []
             st.rerun()
 
     with tab_regras:
-        st.subheader("Regras")
+        st.subheader("Gerenciamento de Regras")
 
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader("IPs Bloqueados")
+            st.subheader("IPs Bloqueados 🚫")
             with lock:
                 ips = sorted(estado["blocks"]["ips_blocked"])
             st.write("\n".join(ips) if ips else "Nenhum IP bloqueado.")
             
-            ip_input = st.text_input("Adicionar IP")
+            ip_input = st.text_input("Novo IP para bloquear: ")
             if st.button("Adicionar IP"):
                 if add_block_ip(ip_input, estado, lock):
                     st.success("IP adicionado!")
@@ -268,12 +334,12 @@ def setup_ui():
                     st.rerun()
 
         with col2:
-            st.subheader("Portas Bloqueadas")
+            st.subheader("Portas Bloqueadas 🚪")
             with lock:
                 ports = sorted(estado["blocks"]["ports_blocked"])
             st.write("\n".join(map(str, ports)) if ports else "Nenhuma porta bloqueada.")
             
-            port_input = st.text_input("Adicionar Porta")
+            port_input = st.text_input("Nova porta para bloquear: ")
             if st.button("Adicionar Porta"):
                 if add_block_port(port_input, estado, lock):
                     st.success("Porta adicionada!")
@@ -291,40 +357,26 @@ def setup_ui():
                     st.rerun()
 
     with tab_estatisticas:
-        st.subheader("Estatísticas")
-        with lock:
-            st.metric("Pacotes Permitidos", estado["pacotes_permitidos"])
-            st.metric("Pacotes Bloqueados", estado["pacotes_bloqueados"])
-
-    # Botão Iniciar/Parar
-    if not st.session_state.running:
-        if st.button("Iniciar Firewall", type="primary"):
-            st.session_state.stop_event.clear()
-            st.session_state.firewall_thread = Thread(target=main, args=(log_queue, estado, st.session_state.stop_event, lock))
-            st.session_state.firewall_thread.daemon = True
-            st.session_state.firewall_thread.start()
-            st.session_state.running = True
-            st.rerun()
-    else:
-        if st.button("Parar Firewall"):
-            st.session_state.stop_event.set()
-            if st.session_state.firewall_thread:
-                st.session_state.firewall_thread.join(timeout=5)  # Espera um pouco para parar
-            st.session_state.running = False
+        st.header("Estatísticas de Tráfego 📊")
+        col_stats1, col_stats2 = st.columns(2)
+        
+        with col_stats1:
             with lock:
-                ips = sorted(list(estado["blocks"]["ips_blocked"]))
-                ports = sorted(list(estado["blocks"]["ports_blocked"]))
-            try:
-                with open(LISTA_DE_BLOCKS, "w") as f:
-                    json.dump({"ips_blocked": ips, "ports_blocked": ports}, f, indent=2)
-                logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
-            except Exception as e:
-                logging.exception("Erro ao salvar blocklist: %s", e)
-            st.rerun()
+                st.metric(label="Pacotes Permitidos", value=estado["pacotes_permitidos"])
+        
+        with col_stats2:
+            with lock:
+                st.metric(label="Pacotes Bloqueados", value=estado["pacotes_bloqueados"])
+        
+        st.markdown("""
+        <p style='font-size: 14px; color: #2F3559; text-align: center; margin-top: 20px;'>
+        As estatísticas são atualizadas em tempo real enquanto o firewall está ativo.
+        </p>
+        """, unsafe_allow_html=True)
 
     # Atualização automática quando rodando
     if st.session_state.running:
-        time.sleep(1)  # Atualiza a cada 1 segundo
+        time.sleep(1) # Atualiza a cada 1 segundo
         st.rerun()
 
 if __name__ == "__main__":
