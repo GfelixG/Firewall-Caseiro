@@ -1,6 +1,4 @@
 {
-  "ips_blocked": [
-    "192.168.0.81"
-  ],
+  "ips_blocked": [],
   "ports_blocked": []
 }

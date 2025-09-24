@@ -208,6 +208,29 @@ def setup_ui():
             background-color: #9A5071;
             border-color: #9A5071;
         }
+        .custom-alert {
+            position: fixed;
+            top: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #9A5071;
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            z-index: 1000;
+            text-align: center;
+            font-size: 16px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.2);
+            animation: fadeIn 0.5s, fadeOut 0.5s 2.5s forwards;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; }
+        }
         </style>
         """,
         unsafe_allow_html=True
@@ -235,15 +258,29 @@ def setup_ui():
         st.session_state.log_queue = queue.Queue()
     if 'estado_lock' not in st.session_state:
         st.session_state.estado_lock = Lock()
+    if 'show_start_alert' not in st.session_state:
+        st.session_state.show_start_alert = False
+    if 'show_stop_alert' not in st.session_state:
+        st.session_state.show_stop_alert = False
+    if 'alert_start_time' not in st.session_state:
+        st.session_state.alert_start_time = None
+    if 'alert_stop_time' not in st.session_state:
+        st.session_state.alert_stop_time = None
 
     log_queue = st.session_state.log_queue
     lock = st.session_state.estado_lock
     estado = st.session_state.estado
 
-    # Process logs from queue
+    # Process logs from queue (sem interrupção por alertas)
     while not log_queue.empty():
         msg, color, timestamp = log_queue.get()
         st.session_state.logs.append((f"[{timestamp}] {msg}", color))
+
+    # Exibir alerta de início ou parada sem bloquear a execução
+    if st.session_state.show_start_alert:
+        st.markdown('<div class="custom-alert">Firewall ativo! Capturando pacotes...</div>', unsafe_allow_html=True)
+    if st.session_state.show_stop_alert:
+        st.markdown('<div class="custom-alert">Firewall parado.</div>', unsafe_allow_html=True)
 
     # Botão Iniciar/Parar
     col1, col2, col3 = st.columns([1,2,1])
@@ -255,6 +292,7 @@ def setup_ui():
                 st.session_state.firewall_thread.daemon = True
                 st.session_state.firewall_thread.start()
                 st.session_state.running = True
+                st.session_state.show_start_alert = True
                 st.rerun()
         else:
             if st.button("Parar Firewall 🛑", type="secondary", use_container_width=True):
@@ -271,6 +309,7 @@ def setup_ui():
                     logging.info(f"Blocklist salva em {LISTA_DE_BLOCKS}")
                 except Exception as e:
                     logging.exception("Erro ao salvar blocklist: %s", e)
+                st.session_state.show_stop_alert = True
                 st.rerun()
 
     # Tabs
@@ -278,50 +317,37 @@ def setup_ui():
 
     with tab_logs:
         st.subheader("Logs de Atividade")
-        
+        log_container = st.empty()
         logs_html = ""
         for msg, color in st.session_state.logs:
             logs_html += f'<p style="color:{color}; margin:0;">{msg}</p>'
-
-        st.markdown(
+        log_container.markdown(
             f"""
-            <style>
-            /* sempre mostrar barra de rolagem vertical */
-            #log-container {{
-                scrollbar-width: thin;           /* Firefox */
-                scrollbar-color: #2F3559 #FAF0E6; /* cor barra + fundo */
-            }}
-
-            /* Chrome, Edge, Safari */
-            #log-container::-webkit-scrollbar {{
-                width: 10px;   /* largura da barra */
-            }}
-            #log-container::-webkit-scrollbar-track {{
-                background: #FAF0E6;  /* cor de fundo */
-                border-radius: 5px;
-            }}
-            #log-container::-webkit-scrollbar-thumb {{
-                background-color: #2F3559; /* cor da barra */
-                border-radius: 5px;
-                border: 2px solid #FAF0E6; /* espaço entre barra e track */
-            }}
-            </style>
-
-            <div id="log-container"
-                style="background-color: #FAF0E6;
-                        border: 1px solid black;
-                        border-radius: 5px;
-                        padding: 10px;
-                        height: 400px;
-                        overflow-y: scroll;">
+            <div id="log-container" style="background-color: #FAF0E6; border: 1px solid black; border-radius: 5px; padding: 10px; height: 400px; overflow-y: auto;">
                 {logs_html}
             </div>
+            <script>
+                window.addEventListener('DOMContentLoaded', function() {{
+                    var element = document.getElementById('log-container');
+                    if (element) {{
+                        element.scrollTop = element.scrollHeight;
+                    }}
+                }});
+                var observer = new MutationObserver(function() {{
+                    var element = document.getElementById('log-container');
+                    if (element) {{
+                        element.scrollTop = element.scrollHeight;
+                    }}
+                }});
+                var target = document.getElementById('log-container');
+                if (target) {{
+                    observer.observe(target, {{ childList: true, subtree: true }});
+                }}
+            </script>
             """,
             unsafe_allow_html=True
         )
-
         st.markdown("<br>", unsafe_allow_html=True)
-        
         if st.button("Limpar Logs"):
             st.session_state.logs = []
             st.rerun()
