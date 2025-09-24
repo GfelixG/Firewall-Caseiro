@@ -281,20 +281,41 @@ def setup_ui():
         
         logs_html = ""
         for msg, color in st.session_state.logs:
-            logs_html += f'<p style="color:{color};">{msg}</p>'
-        
+            logs_html += f'<p style="color:{color}; margin:0;">{msg}</p>'
+
         st.markdown(
             f"""
-            <div id="log-container" style="background-color: #FAF0E6; border: 1px solid black; border-radius: 5px; padding: 10px; height: 400px; overflow-y: auto;">
+            <style>
+            /* sempre mostrar barra de rolagem vertical */
+            #log-container {{
+                scrollbar-width: thin;           /* Firefox */
+                scrollbar-color: #2F3559 #FAF0E6; /* cor barra + fundo */
+            }}
+
+            /* Chrome, Edge, Safari */
+            #log-container::-webkit-scrollbar {{
+                width: 10px;   /* largura da barra */
+            }}
+            #log-container::-webkit-scrollbar-track {{
+                background: #FAF0E6;  /* cor de fundo */
+                border-radius: 5px;
+            }}
+            #log-container::-webkit-scrollbar-thumb {{
+                background-color: #2F3559; /* cor da barra */
+                border-radius: 5px;
+                border: 2px solid #FAF0E6; /* espaço entre barra e track */
+            }}
+            </style>
+
+            <div id="log-container"
+                style="background-color: #FAF0E6;
+                        border: 1px solid black;
+                        border-radius: 5px;
+                        padding: 10px;
+                        height: 400px;
+                        overflow-y: scroll;">
                 {logs_html}
             </div>
-            <script>
-                // Executa a rolagem após o conteúdo ser renderizado
-                var element = document.getElementById("log-container");
-                if (element) {{
-                    element.scrollTop = element.scrollHeight;
-                }}
-            </script>
             """,
             unsafe_allow_html=True
         )
